@@ -40,14 +40,17 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
     PreCheckoutQuery,
     LabeledPrice,
+    ReplyKeyboardMarkup,
 )
 from supabase import Client, create_client
 
 from config import settings
 from payments import payments_router
+from admin import admin_router
 
 # ─────────────────────────────────────────────
 # Логирование
@@ -66,7 +69,6 @@ logger = logging.getLogger(__name__)
 # Константы
 # ─────────────────────────────────────────────
 ADMIN_ID = 8701563086
-FREE_GENERATIONS = 3
 
 TRIGGERS = {
     "fear":      "😱 Страх",
@@ -606,78 +608,6 @@ def composite_cutout_face(
         return bg_bytes
 
 
-def composite_cutout_face(
-    bg_bytes: bytes,
-    face_bytes: bytes,
-    trigger: str,
-    aspect_ratio: str,
-) -> bytes:
-    """
-    1. Вырезает фон с фото пользователя через rembg.
-    2. Размещает вырезанный силуэт на сгенерированном фоне.
-    """
-    try:
-        from rembg import remove
-        
-        # 1. Удаляем фон
-        try:
-            face_cutout_bytes = remove(face_bytes)
-            face_img = Image.open(io.BytesIO(face_cutout_bytes)).convert("RGBA")
-            # Обрезаем прозрачные края
-            bbox = face_img.getbbox()
-            if bbox:
-                face_img = face_img.crop(bbox)
-        except Exception as e:
-            logger.error(f"rembg error: {e}")
-            face_img = Image.open(io.BytesIO(face_bytes)).convert("RGBA")
-        
-        tw, th = YT_SIZES.get(aspect_ratio, (1280, 720))
-        bg = Image.open(io.BytesIO(bg_bytes)).convert("RGBA").resize((tw, th), Image.LANCZOS)
-        
-        face_on_right = trigger in {"fear", "shock", "curiosity"}
-        is_vertical = aspect_ratio == "9:16"
-
-        if is_vertical:
-            # Shorts: портрет снизу-посередине
-            fw = int(tw * 0.85)
-            # Считаем высоту пропорционально
-            fi_w, fi_h = face_img.size
-            if fi_w == 0 or fi_h == 0:
-                return bg_bytes
-            fh = int((fw / fi_w) * fi_h)
-            face_resized = face_img.resize((fw, fh), Image.LANCZOS)
-            
-            x_pos = (tw - fw) // 2
-            y_pos = th - fh
-            bg.paste(face_resized, (x_pos, y_pos), face_resized)
-        else:
-            # YouTube: портрет на одной стороне (низ выравнивается по низу обложки)
-            fw = int(tw * 0.45)
-            fi_w, fi_h = face_img.size
-            if fi_w == 0 or fi_h == 0:
-                return bg_bytes
-            fh = int((fw / fi_w) * fi_h)
-            
-            # Если высота лица больше высоты холста (очень длинное фото) — масштабируем по высоте
-            if fh > int(th * 0.95):
-                fh = int(th * 0.95)
-                fw = int((fh / fi_h) * fi_w)
-                
-            face_resized = face_img.resize((fw, fh), Image.LANCZOS)
-            
-            x_pos = tw - fw if face_on_right else 0
-            y_pos = th - fh
-            bg.paste(face_resized, (x_pos, y_pos), face_resized)
-
-        buf = io.BytesIO()
-        bg.convert("RGB").save(buf, format="JPEG", quality=95)
-        return buf.getvalue()
-
-    except Exception as e:
-        logger.error(f"Ошибка вырезки лица: {e}")
-        return bg_bytes
-
-
 
 # ─────────────────────────────────────────────
 # PIL — текстовый оверлей
@@ -801,6 +731,18 @@ def add_text_overlay(
 # ─────────────────────────────────────────────
 # Supabase — пользователи
 # ─────────────────────────────────────────────
+WELCOME_TEXT = (
+    "🎨 <b>Обложка AI — Твой персональный дизайнер</b>\n\n"
+    "✅ Анализ ДНК стиля вашего канала\n"
+    "✅ 3 AI-варианта текста для обложки\n"
+    "✅ Поддержка 16:9 и Shorts 9:16\n"
+    "✅ Генерация за 30 секунд\n"
+    "✅ Бонусы за приглашение друзей\n\n"
+    "Нажмите <b>🎨 Создать обложку</b>, чтобы начать!"
+)
+
+
+
 def get_or_create_user(user_id: int, username: str = "", referrer_id: int | None = None) -> dict:
     res = supabase.table("users").select("*").eq("user_id", user_id).execute()
     if res.data:
@@ -846,13 +788,20 @@ def get_generations_left(user_id: int) -> int:
 # ─────────────────────────────────────────────
 # Клавиатуры
 # ─────────────────────────────────────────────
-def kb_main() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎨 Создать обложку", callback_data="start_flow")],
-        [
-            InlineKeyboardButton(text="🖼 Мои обложки", callback_data="my_covers"),
-            InlineKeyboardButton(text="💎 Купить генерации", callback_data="buy_generations")
+def kb_main(balance: int = 0) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎨 Создать обложку")],
+            [KeyboardButton(text="🖼 Мои работы"), KeyboardButton(text="👥 Бонусы")],
+            [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text=f"💵 Баланс: {balance}")],
         ],
+        resize_keyboard=True,
+    )
+
+
+def kb_back_inline() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")],
     ])
 
 
@@ -902,10 +851,16 @@ def kb_back(show_change_text: bool = False) -> InlineKeyboardMarkup:
 router = Router()
 
 
+async def send_main_menu(message: Message, user_id: int):
+    """Отправляет главное меню с ReplyKeyboard."""
+    left = get_generations_left(user_id)
+    await message.answer(WELCOME_TEXT, parse_mode=ParseMode.HTML, reply_markup=kb_main(left))
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject, state: FSMContext) -> None:
     await state.clear()
-    
+
     referrer_id = None
     if command.args:
         try:
@@ -914,61 +869,116 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
             pass
 
     get_or_create_user(message.from_user.id, message.from_user.username or "", referrer_id=referrer_id)
-
-    left = get_generations_left(message.from_user.id)
-    limits_info = (
-        "👑 <b>Администратор</b> — лимиты отключены."
-        if message.from_user.id == ADMIN_ID
-        else f"🎁 Генераций на балансе: <b>{left}</b>"
-    )
-    
-    bot_info = await message.bot.me()
-    ref_link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
-
-    await message.answer(
-        f"👋 Привет, <b>{message.from_user.first_name}</b>!\n\n"
-        "Я — <b>Обложка AI</b> 🎨\n"
-        "Создаю профессиональные YouTube-обложки в стиле вашего канала.\n\n"
-        f"{limits_info}\n\n"
-        f"🔗 <b>Твоя реферальная ссылка:</b>\n<code>{ref_link}</code>\n"
-        "Приглашай друзей и получай +1 генерацию за каждого нового пользователя!",
-        reply_markup=kb_main(),
-        parse_mode=ParseMode.HTML,
-    )
+    await send_main_menu(message, message.from_user.id)
 
 
-@router.message(Command("new_style"))
-async def cmd_new_style(message: Message, state: FSMContext) -> None:
+# ── Reply-кнопка: 🎨 Создать обложку ──
+@router.message(F.text == "🎨 Создать обложку")
+async def btn_create_cover(message: Message, state: FSMContext) -> None:
     await state.clear()
     if not can_generate(message.from_user.id):
-        await message.answer("😢 <b>Лимит генераций исчерпан.</b>", parse_mode=ParseMode.HTML, reply_markup=kb_back())
+        from payments import kb_tariffs
+        await message.answer(
+            "😢 <b>У вас закончились генерации!</b>\n\nПополните баланс:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_tariffs(),
+        )
         return
     await state.set_state(BotStates.waiting_links)
     await message.answer(
-        "🔗 <b>Отправьте 5–10 ссылок</b> на видео вашего канала (каждая с новой строки):",
+        "🔗 <b>Отправьте 5–10 ссылок</b> на YouTube-видео или Shorts вашего канала "
+        "(каждая с новой строки):",
         parse_mode=ParseMode.HTML,
     )
 
 
-@router.callback_query(F.data == "start_flow")
-async def cb_start_flow(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    await callback.message.edit_reply_markup(reply_markup=None)
-    if not can_generate(callback.from_user.id):
-        from payments import kb_tariffs
-        promo_text = (
-            "😢 <b>У вас закончились генерации!</b>\n\n"
-            "В отличие от простых нейросетей-рисовалок, этот бот проводит глубокий ИИ-анализ "
-            "дизайна вашего канала.\n\n"
-            "Пополните баланс для продолжения:"
+# ── Reply-кнопка: 🖼 Мои работы ──
+@router.message(F.text == "🖼 Мои работы")
+async def btn_my_works(message: Message) -> None:
+    res = (
+        supabase.table("user_history")
+        .select("*")
+        .eq("user_id", message.from_user.id)
+        .order("created_at", desc=True)
+        .limit(5)
+        .execute()
+    )
+    if not res.data:
+        await message.answer(
+            "🖼 <b>Мои работы</b>\n\nУ вас пока нет сохранённых обложек.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_back_inline(),
         )
-        await callback.message.answer(promo_text, parse_mode=ParseMode.HTML, reply_markup=kb_tariffs())
         return
-    await state.set_state(BotStates.waiting_links)
-    await callback.message.answer(
-        "🔗 <b>Отправьте 5–10 ссылок</b> на YouTube-видео или Shorts вашего канала (каждая с новой строки):",
+    await message.answer("🖼 <b>Ваши последние обложки:</b>", parse_mode=ParseMode.HTML)
+    for record in reversed(res.data):
+        text = record.get("prompt") or "Без текста"
+        try:
+            await message.answer_document(document=record["file_id"], caption=f"💬 {text}")
+        except Exception:
+            pass
+    await message.answer("⬇️", reply_markup=kb_back_inline())
+
+
+# ── Reply-кнопка: 👥 Бонусы ──
+@router.message(F.text == "👥 Бонусы")
+async def btn_bonuses(message: Message) -> None:
+    bot_info = await message.bot.me()
+    ref_link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
+    await message.answer(
+        "👥 <b>Бонусная программа</b>\n\n"
+        "🎁 Приглашайте друзей и получайте бонусы!\n\n"
+        "📌 <b>Как это работает:</b>\n"
+        "1️⃣ Отправьте другу вашу ссылку\n"
+        "2️⃣ Друг регистрируется в боте\n"
+        "3️⃣ После его первой покупки вы получаете <b>+3 генерации</b>\n\n"
+        f"🔗 <b>Ваша ссылка:</b>\n<code>{ref_link}</code>",
         parse_mode=ParseMode.HTML,
+        reply_markup=kb_back_inline(),
     )
+
+
+# ── Reply-кнопка: 👤 Мой профиль ──
+@router.message(F.text == "👤 Мой профиль")
+async def btn_profile(message: Message) -> None:
+    user = get_or_create_user(message.from_user.id, message.from_user.username or "")
+    balance = user.get("balance", 0)
+    used = user.get("generations_used", 0)
+    created = str(user.get("created_at", ""))[:10]
+    await message.answer(
+        f"👤 <b>Мой профиль</b>\n\n"
+        f"🆔 ID: <code>{message.from_user.id}</code>\n"
+        f"💰 Баланс: <b>{balance}</b> генераций\n"
+        f"🎨 Использовано: {used}\n"
+        f"📅 Регистрация: {created}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_back_inline(),
+    )
+
+
+# ── Reply-кнопка: 💵 Баланс ──
+@router.message(F.text.startswith("💵 Баланс"))
+async def btn_balance(message: Message) -> None:
+    from payments import kb_tariffs
+    left = get_generations_left(message.from_user.id)
+    await message.answer(
+        f"💰 <b>Ваш баланс: {left} генераций</b>\n\n"
+        "Выберите пакет для пополнения:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_tariffs(),
+    )
+
+
+# ── Callback: ⬅️ Назад → главное меню ──
+@router.callback_query(F.data == "back_to_main")
+async def cb_back_to_main(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await send_main_menu(callback.message, callback.from_user.id)
 
 
 # ── Ссылки ──
@@ -1299,32 +1309,11 @@ async def cb_change_text(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_restart(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.answer()
-    await callback.message.delete()
-    # Восстанавливаем команду start, оборачивая в CommandObject
-    dummy_cmd = CommandObject(prefix="/", command="start", mention="", args="")
-    await cmd_start(callback.message, dummy_cmd, state)
-
-
-# ─────────────────────────────────────────────
-# История обложек
-# ─────────────────────────────────────────────
-@router.callback_query(F.data == "my_covers")
-async def cb_my_covers(callback: CallbackQuery) -> None:
-    await callback.answer()
-    res = supabase.table("user_history")\
-        .select("*")\
-        .eq("user_id", callback.from_user.id)\
-        .order("created_at", desc=True)\
-        .limit(5).execute()
-        
-    if not res.data:
-        await callback.message.answer("У вас пока нет сохраненных обложек 🥺")
-        return
-        
-    await callback.message.answer("🖼 <b>Ваши последние обложки:</b>", parse_mode=ParseMode.HTML)
-    for record in reversed(res.data): # выводим в хронологическом (от старых к новым в этой 5-ке)
-        text = record.get("prompt") or "Без текста"
-        await callback.message.answer_document(document=record["file_id"], caption=f"💬 Текст: {text}")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await send_main_menu(callback.message, callback.from_user.id)
 
 # ─────────────────────────────────────────────
 # Точка входа
@@ -1336,9 +1325,8 @@ async def main() -> None:
     )
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    
-    from payments import payments_router
     dp.include_router(payments_router)
+    dp.include_router(admin_router)
 
     logger.info("🤖 Бот 'Обложка AI' запускается...")
     await bot.delete_webhook(drop_pending_updates=True)
