@@ -1,0 +1,33 @@
+# Переменные окружения и ключи API (КРИТИЧЕСКИ ВАЖНО)
+.env
+.env.*
+
+# Приватная документация (защита логики бота от копирования)
+dop.md
+zadanie.md
+README.md
+
+# Временные файлы Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Виртуальное окружение
+.venv/
+venv/
+ENV/
+
+# Временные папки/файлы
+faces/
+*.log
+or_dump.json
+output.json
+
+# Системные файлы macOS/Windows
+.DS_Store
+Thumbs.db
+
+# Настройки редакторов кода
+.vscode/
+.idea/
